@@ -1,0 +1,87 @@
+name: Deploy Virtual Character
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'KINGKAZMAX/virtual-character-web'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Read public release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify and unpack release
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib, tarfile
+          root = pathlib.Path.cwd()
+          manifest = json.loads((root / 'release-manifest.json').read_text())
+          assert manifest['schemaVersion'] == 1
+          assert manifest['siteUrl'] == 'https://kingkazmax.github.io/virtual-character-web/'
+          assert manifest['basePath'] == '/virtual-character-web/'
+          archive = manifest['archive']
+          assert archive['name'] == 'site.tar.gz'
+          assert archive['chunks']
+          archive_path = root / archive['name']
+          with archive_path.open('wb') as output:
+              for index, chunk in enumerate(archive['chunks'], 1):
+                  assert chunk['name'] == f'site.tar.gz.part-{index:04d}'
+                  path = root / chunk['name']
+                  assert not path.is_symlink()
+                  data = path.read_bytes()
+                  assert 0 < len(data) <= 20 * 1024 * 1024
+                  assert len(data) == chunk['bytes']
+                  assert hashlib.sha256(data).hexdigest() == chunk['sha256']
+                  output.write(data)
+          assert archive_path.stat().st_size == archive['bytes']
+          assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive['sha256']
+          site = root / '_site'
+          site.mkdir()
+          with tarfile.open(archive_path, 'r:gz') as bundle:
+              members = bundle.getmembers()
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  assert member.isfile() and not path.is_absolute() and '..' not in path.parts
+              bundle.extractall(site, members=members, filter='data')
+          expected = {entry['path']: entry for entry in manifest['files']}
+          actual = {path.relative_to(site).as_posix(): path for path in site.rglob('*') if path.is_file()}
+          assert set(actual) == set(expected)
+          for name, path in actual.items():
+              data = path.read_bytes()
+              assert len(data) == expected[name]['bytes']
+              assert hashlib.sha256(data).hexdigest() == expected[name]['sha256']
+          assert (site / 'index.html').is_file()
+          assert (site / '404.html').is_file()
+          assert (site / '.nojekyll').is_file()
+          print(f"Verified {len(actual)} public files from {len(archive['chunks'])} chunks.")
+          PY
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Upload public website
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+          include-hidden-files: true
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
